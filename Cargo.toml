@@ -1,0 +1,11 @@
+[package]
+name = "ecoflow-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.45"
+default-net = "0.22.0"
+local-ip-address = "0.6.13"
+mpsc = "0.3.0"
+serde = { version = "1.0.229", features = ["derive"] }

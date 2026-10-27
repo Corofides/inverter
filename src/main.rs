@@ -1,0 +1,285 @@
+use std::net::UdpSocket;
+use serde::{Serialize, Deserialize};
+use std::net::{TcpStream, TcpListener};
+use local_ip_address::local_ip;
+use default_net::gateway::get_default_gateway;
+use chrono::prelude::*;
+use std::io::{Error, Write, Read};
+
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Frame {
+    id: u16,
+    code: u16,
+    length: u16,
+    addr: u8,
+    f_code: u8,
+    payload: Vec<u8>,
+}
+
+impl Frame {
+    fn new(tid: u16, dev_code: u16, dev_addr: u8, f_code: u8, payload: Vec<u8>) -> Frame {
+        
+        Self {
+            id: tid,
+            code: dev_code,
+            length: 2 + (payload.len() as u16),
+            addr: dev_addr,
+            f_code: f_code,
+            payload: payload,
+        }
+    }
+
+    fn header(&self) -> Vec<u8> {
+
+        let mut header = Vec::new();
+
+        header.append(&mut Vec::from(self.id.to_be_bytes()));
+        header.append(&mut Vec::from(self.code.to_be_bytes()));
+        header.append(&mut Vec::from(self.length.to_be_bytes()));
+        header.append(&mut Vec::from(self.addr.to_be_bytes()));
+        header.append(&mut Vec::from(self.f_code.to_be_bytes()));
+
+        return header;
+    }
+
+    fn packet(&mut self) -> Vec<u8> {
+        let mut packet = self.header();
+        packet.append(&mut self.payload);
+
+        return packet;
+    }
+}
+
+
+
+fn heartbeat(tid: u16) -> Frame {
+
+    let now = Utc::now();
+
+    let mut payload = Vec::new();
+
+    let year = (now.year() - 2000) as u8;
+
+    let be_year: [u8; 1] = year.to_be_bytes();
+
+    payload.append(&mut Vec::from(be_year));
+
+
+    payload.append(&mut Vec::from((now.month() as u8).to_be_bytes()));
+    payload.append(&mut Vec::from((now.day() as u8).to_be_bytes()));
+    payload.append(&mut Vec::from((now.hour() as u8).to_be_bytes()));
+    payload.append(&mut Vec::from((now.minute() as u8).to_be_bytes()));
+    payload.append(&mut Vec::from((now.second() as u8).to_be_bytes()));
+    payload.append(&mut Vec::from(300_u16.to_be_bytes()));
+
+    return Frame::new(
+        tid,
+        0x0001,
+        0xFF,
+        0x01,
+        payload,
+    );
+}
+
+fn transact(mut socket: &TcpStream, mut command: Frame) -> Result<usize, Error> {
+
+    let response = socket.write(command.packet().as_slice());
+    return response;
+
+    //return String::from("Hello");
+}
+
+fn main() -> std::io::Result<()> {
+
+    let tcp_port = 8899;
+    let udp_port = 58899;
+    let default_gateway = get_default_gateway();
+
+    let Ok(default_gateway) = default_gateway else {
+        return Ok(());
+    };
+
+    {
+        //let mut heartbeat = heartbeat(1);
+
+        let socket = UdpSocket::bind("0.0.0.0:34254")?;
+        let my_ip_addr = local_ip();
+
+        //let header = heartbeat.packet();
+
+        let Ok(my_ip_addr) = my_ip_addr else {
+            return Ok(());
+        };
+
+        let tcp_addr = format!("{}:{}", my_ip_addr, tcp_port);
+
+        println!("TCP Address: {}", tcp_addr);
+
+        let listener = TcpListener::bind(&tcp_addr);
+        let Ok(listener) = listener else {
+            println!("could not start tcp listener");
+            return Ok(());
+        };
+
+        let cmd = format!("set>server={};", &tcp_addr);
+
+        let cmd = cmd.into_bytes();
+
+        let gateway_addr = format!("{}:{}", default_gateway.ip_addr, udp_port);
+
+        println!("Initial Connection -> {}", gateway_addr);
+
+        socket.send_to(&cmd, &gateway_addr).expect("Send to should succeed");
+
+        println!("Pending...");
+
+        let mut buf = [0; 10];
+
+        let (amt, src) = socket.recv_from(&mut buf)?;
+
+        let response = String::from_utf8((&buf).to_vec());
+
+        let Ok(response) = response else {
+            println!("Not a string.");
+            return Ok(());
+        };
+
+        println!("Response: {}", response);
+
+        let Ok((mut socket, addr)) = listener.accept() else {
+            println!("Could not establish connection.");
+            return Ok(());
+        };
+
+        let mut t_id = 1;
+        let rsp = transact(&socket, heartbeat(t_id));
+
+        let (send_tx, send_rx) = mpsc::channel();
+
+        {
+
+            let tx: std::sync::mpsc::Sender<Frame> = send_tx.clone();
+
+            // This is bob, bob is amazing.
+            thread::spawn(move || {
+
+                let mut t_id = 1;
+                let mut seconds = 0;
+
+                // Infinite loop gooooo!
+                loop {
+                    seconds += 1;
+
+                    if seconds < 300 {
+                        thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+
+                    send_tx.send(heartbeat(t_id));
+                    t_id += 1;
+                    seconds = 0;
+
+                }
+
+            });
+        }
+
+        {
+            if let Ok(mut socket) = socket.try_clone() {
+                thread::spawn(move || {
+                    for received in send_rx {
+                        println!("Frame Received");
+                        let rsp = transact(&socket, received);
+                    }
+                });
+            };
+        }
+
+        
+        let (tx, rx) = mpsc::channel();
+
+        {
+            let tx: std::sync::mpsc::Sender<Frame> = tx.clone();
+            if let Ok(mut socket) = socket.try_clone() {
+
+                let mut resp_frame = Frame::new(
+                    0,
+                    0,
+                    0,
+                    0,
+                    Vec::new()
+                );
+
+                thread::spawn(move || {
+                    let mut buffer: [u8; 6] = [0; 6];
+                    //let mut waiting = true;
+                    let mut received = 0;
+                    
+                    while /*waiting && */ let Ok(len) = socket.read(&mut buffer) {
+
+                        if len == 0 {
+                            continue;
+                        }
+
+                        if resp_frame.id == 0 {
+
+                            let t_id = ((buffer[0] as u16) << 8) | buffer[1] as u16;
+                            let dev_code = ((buffer[2] as u16) << 8) | buffer[3] as u16;
+                            let length = ((buffer[4] as u16) << 8) | buffer[5] as u16;
+
+                            resp_frame.id = t_id;
+                            resp_frame.code = dev_code;
+                            resp_frame.length = length;
+
+                        } else {
+                            received = received + len;
+
+                            // let's just assume address and fcode will never both be 0;
+                            if (resp_frame.addr == 0 && resp_frame.f_code == 0) {
+                                resp_frame.addr = buffer[0];
+                                resp_frame.f_code = buffer[1];
+
+                                resp_frame.payload.extend_from_slice(&buffer[2..]);
+                            } else {
+                                resp_frame.payload.extend_from_slice(&buffer);
+                            }
+
+                            if received >= resp_frame.length.into() {
+                                tx.send(resp_frame.clone());
+
+                                received = 0;
+                                resp_frame = Frame::new(
+                                    0,
+                                    0,
+                                    0,
+                                    0,
+                                    Vec::new()
+                                );
+
+                            }
+                        }
+
+                        buffer = [0; 6];
+                        thread::sleep(Duration::from_secs(1));
+
+                    }
+                    
+                });
+                
+            }
+
+        }
+
+        for received in rx {
+            println!("Frame: {:?}", received);
+        }
+
+    }
+
+    Ok(())
+
+}
