@@ -5,10 +5,75 @@ use local_ip_address::local_ip;
 use default_net::gateway::get_default_gateway;
 use chrono::prelude::*;
 use std::io::{Error, Write, Read};
+use std::collections::HashMap;
 
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+
+#[derive(Debug, Clone)]
+pub struct Register {
+    name: String,
+    scale: f32,
+    unit: String,
+    signed: bool,
+}
+
+impl Register {
+    fn new(name: String, scale: f32, unit: String, signed: bool) -> Register {
+        Self {
+            name,
+            scale,
+            unit,
+            signed,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Invertor {
+    pub registers: HashMap<u16, Register>,
+}
+
+impl Invertor {
+    fn new() -> Invertor {
+        let mut registers = HashMap::new();
+
+        registers.insert(0x000B, Register::new(
+            "product type".to_string(),
+            1.0,
+            "".to_string(),
+            false,
+        ));
+
+        registers.insert(0x0100, Register::new(
+            "battery SOC".to_string(),
+            1.0,
+            "%".to_string(),
+            false,
+        ));
+
+        registers.insert(0x0101, Register::new(
+            "battery voltage".to_string(),
+            0.1,
+            "V".to_string(),
+            false,
+        ));
+
+        registers.insert(0x102, Register::new(
+            "battery current".to_string(),
+            0.1,
+            "A".to_string(),
+            false,
+        ));
+
+
+        Self {
+            registers,
+        }
+
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Frame {
@@ -74,7 +139,7 @@ fn heartbeat(tid: u16) -> Frame {
     payload.append(&mut Vec::from((now.hour() as u8).to_be_bytes()));
     payload.append(&mut Vec::from((now.minute() as u8).to_be_bytes()));
     payload.append(&mut Vec::from((now.second() as u8).to_be_bytes()));
-    payload.append(&mut Vec::from(300_u16.to_be_bytes()));
+    payload.append(&mut Vec::from(60_u16.to_be_bytes()));
 
     return Frame::new(
         tid,
@@ -94,6 +159,10 @@ fn transact(mut socket: &TcpStream, mut command: Frame) -> Result<usize, Error> 
 }
 
 fn main() -> std::io::Result<()> {
+
+    let invertor = Invertor::new();
+
+    println!("Invertor: {:?}", invertor);
 
     let tcp_port = 8899;
     let udp_port = 58899;
@@ -155,14 +224,19 @@ fn main() -> std::io::Result<()> {
             return Ok(());
         };
 
-        let mut t_id = 1;
-        let rsp = transact(&socket, heartbeat(t_id));
+        //let mut t_id = 1;
+        //let rsp = transact(&socket, heartbeat(t_id));
 
         let (send_tx, send_rx) = mpsc::channel();
 
+        // Send Heartbeat to Receiver;
         {
 
-            let tx: std::sync::mpsc::Sender<Frame> = send_tx.clone();
+            let send_tx: std::sync::mpsc::Sender<Frame> = send_tx.clone();
+            // I'm assuming this has to be lower than the heartbeat wait time because
+            // heartbeat wait is expect a heartbeat in x, if not, stop.
+
+            let heartbeat_delay = 30;
 
             // This is bob, bob is amazing.
             thread::spawn(move || {
@@ -172,27 +246,32 @@ fn main() -> std::io::Result<()> {
 
                 // Infinite loop gooooo!
                 loop {
-                    seconds += 1;
 
-                    if seconds < 300 {
-                        thread::sleep(Duration::from_secs(1));
-                        continue;
+                    if (seconds == 0) {
+                        println!("Sending Frame");
+                        send_tx.send(heartbeat(t_id));
+                        t_id += 1;
                     }
 
-                    send_tx.send(heartbeat(t_id));
-                    t_id += 1;
-                    seconds = 0;
+                    thread::sleep(Duration::from_secs(1));
+                    seconds += 1;
+                    
+                    if seconds >= heartbeat_delay {
+                        seconds = 0;
+                    }
 
+                    
                 }
 
             });
         }
 
+
         {
             if let Ok(mut socket) = socket.try_clone() {
                 thread::spawn(move || {
                     for received in send_rx {
-                        println!("Frame Received");
+                        println!("Frame Received: {:?}", received);
                         let rsp = transact(&socket, received);
                     }
                 });
@@ -275,7 +354,7 @@ fn main() -> std::io::Result<()> {
         }
 
         for received in rx {
-            println!("Frame: {:?}", received);
+            println!("Frame from Invertor: {:?}", received);
         }
 
     }
