@@ -11,6 +11,26 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use std::sync::Mutex;
+use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+pub struct Block {
+    name: String,
+    register: u16,
+    count: u16,
+}
+
+impl Block {
+    fn new(name: String, register: u16, count: u16) -> Block {
+        Self {
+            name,
+            register,
+            count,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Register {
     name: String,
@@ -33,6 +53,7 @@ impl Register {
 #[derive(Debug, Clone)]
 pub struct Invertor {
     pub registers: HashMap<u16, Register>,
+    pub blocks: Vec<Block>,
 }
 
 impl Invertor {
@@ -67,9 +88,24 @@ impl Invertor {
             false,
         ));
 
+        let mut blocks = Vec::new();
+
+        blocks.push(Block::new(
+            "product_type".to_string(),
+            0x000B,
+            1,
+        ));
+
+        blocks.push(Block::new(
+            "battery / pv".to_string(),
+            0x0100,
+            3,
+        ));
+
 
         Self {
             registers,
+            blocks
         }
 
     }
@@ -162,7 +198,9 @@ fn main() -> std::io::Result<()> {
 
     let invertor = Invertor::new();
 
+
     println!("Invertor: {:?}", invertor);
+    println!("Blocks: {:?}", invertor.blocks);
 
     let tcp_port = 8899;
     let udp_port = 58899;
@@ -226,11 +264,19 @@ fn main() -> std::io::Result<()> {
 
         //let mut t_id = 1;
         //let rsp = transact(&socket, heartbeat(t_id));
+        
+        // what I want:
+        // an u32
+        // that I can grab from multiple threads
+        // and when it's read it increases by one.
+        // how do that?
+        let t_id = Arc::new(Mutex::new(1));
 
         let (send_tx, send_rx) = mpsc::channel();
 
         // Send Heartbeat to Receiver;
         {
+            let t_id_arc = Arc::clone(&t_id);
 
             let send_tx: std::sync::mpsc::Sender<Frame> = send_tx.clone();
             // I'm assuming this has to be lower than the heartbeat wait time because
@@ -241,16 +287,23 @@ fn main() -> std::io::Result<()> {
             // This is bob, bob is amazing.
             thread::spawn(move || {
 
-                let mut t_id = 1;
                 let mut seconds = 0;
 
                 // Infinite loop gooooo!
                 loop {
 
                     if (seconds == 0) {
+
+                        let mut t_id = 1;
+
+                        {
+                            let mut lock = t_id_arc.lock().unwrap();
+                            t_id = *lock;
+                            *lock += 1;
+                        }
                         println!("Sending Frame");
                         send_tx.send(heartbeat(t_id));
-                        t_id += 1;
+                        // t_id += 1;
                     }
 
                     thread::sleep(Duration::from_secs(1));
@@ -266,7 +319,22 @@ fn main() -> std::io::Result<()> {
             });
         }
 
+        /*
+        {
+            let t_id_arc = Arc::clone(&t_id);
+            let send_tx: std::sync::mpsc::Sender<Frame> = send_tx.clone();
+            let info_delay = 10;
 
+            //this is fred, he is a thread;
+            thread::spawn(move || {
+
+                //this is what we call a problem...
+                let mut t_id = 1;
+            });
+        }*/
+
+
+        // Send Block Request to invertor;
         {
             if let Ok(mut socket) = socket.try_clone() {
                 thread::spawn(move || {
