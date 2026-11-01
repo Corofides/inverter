@@ -176,6 +176,34 @@ impl Frame {
 
         return packet;
     }
+
+    // No idea if this is right but we do at least return a thing
+    fn crc16_modbus(data: Vec<u8>) -> Vec<u8> {
+
+        let mut crc = 0xFFFF;
+
+        for byte in data {
+            crc ^= (byte as u16);
+
+            for _ in 0..8 {
+
+                let xor_value: u16 = if (crc % 2) == 1 {
+                    0xA001
+                } else {
+                    (crc >> 1).into()
+                };
+
+                crc = (crc >> 1_u16) ^ xor_value;
+
+            }
+
+        }
+
+        return Vec::from(crc.to_be_bytes());
+    }
+
+    /*fn read_req(&mut self, dev_addr: u16, start: u16, count: u16) {
+    }*/
 }
 
 
@@ -198,6 +226,8 @@ fn heartbeat(tid: u16) -> Frame {
     payload.append(&mut Vec::from((now.hour() as u8).to_be_bytes()));
     payload.append(&mut Vec::from((now.minute() as u8).to_be_bytes()));
     payload.append(&mut Vec::from((now.second() as u8).to_be_bytes()));
+
+    // There's something I'm not getting about the way this works.
     payload.append(&mut Vec::from(60_u16.to_be_bytes()));
 
     return Frame::new(
@@ -228,6 +258,10 @@ fn main() -> std::io::Result<()> {
     let tcp_port = 8899;
     let udp_port = 58899;
     let default_gateway = get_default_gateway();
+
+    let payload = Vec::from((0xFA01_u16).to_be_bytes());
+    let crc = Frame::crc16_modbus(payload);
+    println!("{:?}", crc);
 
     let Ok(default_gateway) = default_gateway else {
         return Ok(());
@@ -269,7 +303,7 @@ fn main() -> std::io::Result<()> {
 
         let mut buf = [0; 10];
 
-        let (amt, src) = socket.recv_from(&mut buf)?;
+        socket.recv_from(&mut buf)?;
 
         let response = String::from_utf8((&buf).to_vec());
 
@@ -280,7 +314,7 @@ fn main() -> std::io::Result<()> {
 
         println!("Response: {}", response);
 
-        let Ok((mut socket, addr)) = listener.accept() else {
+        let Ok((socket, _addr)) = listener.accept() else {
             println!("Could not establish connection.");
             return Ok(());
         };
@@ -316,17 +350,12 @@ fn main() -> std::io::Result<()> {
                 // Infinite loop gooooo!
                 loop {
 
-                    if (seconds == 0) {
+                    if seconds == 0 {
 
-                        let mut t_id = 1;
-
-                        {
+                        let t_id = {
                             let mut lock = t_id_arc.lock().unwrap();
-                            t_id = (*lock).get_id();
-
-                            /* t_id = *lock;
-                            ((*lock)).overflowing_add(1); */
-                        }
+                            (*lock).get_id()
+                        };
 
                         println!("Sending Frame");
                         send_tx.send(heartbeat(t_id));
@@ -346,8 +375,8 @@ fn main() -> std::io::Result<()> {
             });
         }
 
-        /*
-        {
+        
+        /* {
             let t_id_arc = Arc::clone(&t_id);
             let send_tx: std::sync::mpsc::Sender<Frame> = send_tx.clone();
             let info_delay = 10;
@@ -355,19 +384,49 @@ fn main() -> std::io::Result<()> {
             //this is fred, he is a thread;
             thread::spawn(move || {
 
-                //this is what we call a problem...
-                let mut t_id = 1;
+                let mut seconds = 0;
+
+                loop {
+
+                    if seconds == 0 {
+                        let mut t_id = 1;
+                        
+                        {
+                            let mut lock = t_id_arc.lock().unwrap();
+                            t_id = (*lock).get_id();
+                        }
+
+                        println!("Sending Info Frame");
+                        // (tid: u16, dev_code: u16, dev_addr: u8, f_code: u8, payload: Vec<u8>) -> Frame {
+
+                        send_tx.send(Frame::new(
+                            t_id,
+                            0x0001,
+                            0x0001, // Dev Addr
+                            0x04,   // FCode
+                            read_req(0x0001, 0x0001, 4);
+                        ));
+                    }
+
+                    thread::sleep(Duration::from_secs(1));
+                    seconds += 1;
+                    
+                    if seconds >= heartbeat_delay {
+                        seconds = 0;
+                    }
+                }
+
             });
-        }*/
+        } */
 
 
         // Send Block Request to invertor;
         {
-            if let Ok(mut socket) = socket.try_clone() {
+            if let Ok(socket) = socket.try_clone() {
                 thread::spawn(move || {
                     for received in send_rx {
                         println!("Frame Received: {:?}", received);
-                        let rsp = transact(&socket, received);
+                        transact(&socket, received);
                     }
                 });
             };
@@ -413,7 +472,7 @@ fn main() -> std::io::Result<()> {
                             received = received + len;
 
                             // let's just assume address and fcode will never both be 0;
-                            if (resp_frame.addr == 0 && resp_frame.f_code == 0) {
+                            if resp_frame.addr == 0 && resp_frame.f_code == 0 {
                                 resp_frame.addr = buffer[0];
                                 resp_frame.f_code = buffer[1];
 
