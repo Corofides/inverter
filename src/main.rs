@@ -183,18 +183,17 @@ impl Frame {
         let mut crc = 0xFFFF;
 
         for byte in data {
+
             crc ^= (byte as u16);
 
             for _ in 0..8 {
 
-                let xor_value: u16 = if (crc % 2) == 1 {
-                    0xA001
+                crc = if (crc & 1) == 1 {
+                    (crc >> 1) ^ 0xA001
                 } else {
-                    (crc >> 1).into()
+                    crc >> 1
                 };
-
-                crc = (crc >> 1_u16) ^ xor_value;
-
+                
             }
 
         }
