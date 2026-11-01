@@ -111,6 +111,29 @@ impl Invertor {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct TransactionIdGenerator {
+    id: u16,
+}
+
+impl TransactionIdGenerator {
+    fn new() -> Self {
+        Self {
+            id: 0,
+        }
+    }
+    fn get_id(&mut self) -> u16 {
+        self.id = self.id.wrapping_add(1);
+
+        // I don't think the invertor liked a 0 id;
+        if self.id == 0 {
+            self.id = self.id.wrapping_add(1);
+        }
+
+        return self.id;
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Frame {
     id: u16,
@@ -270,7 +293,8 @@ fn main() -> std::io::Result<()> {
         // that I can grab from multiple threads
         // and when it's read it increases by one.
         // how do that?
-        let t_id = Arc::new(Mutex::new(1));
+        //let t_id = Arc::new(Mutex::new(1_u16));
+        let t_id = Arc::new(Mutex::new(TransactionIdGenerator::new()));
 
         let (send_tx, send_rx) = mpsc::channel();
 
@@ -298,9 +322,12 @@ fn main() -> std::io::Result<()> {
 
                         {
                             let mut lock = t_id_arc.lock().unwrap();
-                            t_id = *lock;
-                            *lock += 1;
+                            t_id = (*lock).get_id();
+
+                            /* t_id = *lock;
+                            ((*lock)).overflowing_add(1); */
                         }
+
                         println!("Sending Frame");
                         send_tx.send(heartbeat(t_id));
                         // t_id += 1;
