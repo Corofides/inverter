@@ -201,8 +201,27 @@ impl Frame {
         return Vec::from(crc.to_be_bytes());
     }
 
-    /*fn read_req(&mut self, dev_addr: u16, start: u16, count: u16) {
-    }*/
+    fn set_payload(&mut self, payload: Vec<u8>) {
+        self.payload = payload;
+        self.length = 2 + (self.payload.len() as u16);
+    }
+
+    fn read_req(&mut self, dev_addr: u8, start: u16, count: u16) {
+
+        let mut payload = Vec::new();
+
+        payload.append(&mut Vec::from(dev_addr.to_be_bytes()));
+        payload.append(&mut Vec::from(0x03_u8.to_be_bytes()));
+        payload.append(&mut Vec::from(start.to_be_bytes()));
+        payload.append(&mut Vec::from(count.to_be_bytes()));
+        
+        let mut crc16 = Frame::crc16_modbus(payload.clone());
+
+        payload.append(&mut crc16);
+
+        self.set_payload(payload);
+
+    }
 }
 
 
@@ -375,7 +394,7 @@ fn main() -> std::io::Result<()> {
         }
 
         
-        /* {
+        {
             let t_id_arc = Arc::clone(&t_id);
             let send_tx: std::sync::mpsc::Sender<Frame> = send_tx.clone();
             let info_delay = 10;
@@ -398,25 +417,31 @@ fn main() -> std::io::Result<()> {
                         println!("Sending Info Frame");
                         // (tid: u16, dev_code: u16, dev_addr: u8, f_code: u8, payload: Vec<u8>) -> Frame {
 
-                        send_tx.send(Frame::new(
+                        let mut read_frame = Frame::new(
                             t_id,
                             0x0001,
-                            0x0001, // Dev Addr
+                            0x01, // Dev Addr
                             0x04,   // FCode
-                            read_req(0x0001, 0x0001, 4);
-                        ));
+                            Vec::new(),
+                        );
+
+                        // DEV_ADDR (u8), Register Address (u16), Count (u16)
+                        read_frame.read_req(0x01, 0x000B, 1);
+
+                        println!("Read Frame: {:?}", read_frame);
+
                     }
 
                     thread::sleep(Duration::from_secs(1));
                     seconds += 1;
                     
-                    if seconds >= heartbeat_delay {
+                    if seconds >= info_delay {
                         seconds = 0;
                     }
                 }
 
             });
-        } */
+        }
 
 
         // Send Block Request to invertor;
