@@ -177,8 +177,7 @@ impl Frame {
         return packet;
     }
 
-    // No idea if this is right but we do at least return a thing
-    fn crc16_modbus(data: Vec<u8>) -> Vec<u8> {
+    fn crc16_modbus(data: Vec<u8>) -> u16 {
 
         let mut crc = 0xFFFF;
 
@@ -198,7 +197,46 @@ impl Frame {
 
         }
 
-        return Vec::from(crc.to_be_bytes());
+        return crc;
+    }
+
+    fn check_crc(&self) -> bool {
+
+        let payload = Vec::from(&self.payload[0..self.payload.len() - 2]);
+
+        let current_crc: u16 = {
+
+            let mut current_crc = 0;
+
+            let crc_slice: Result<[u8; 2], _> = self.payload[self.payload.len()-2..].try_into();
+
+            if crc_slice.is_ok() {
+                current_crc = u16::from_le_bytes(crc_slice.unwrap())
+            }
+
+            current_crc
+        };
+        //let current_crc = u16::from_le_bytes(current_crc);
+        let new_crc = Frame::crc16_modbus(payload);
+
+        return current_crc == new_crc;
+    }
+
+    fn decode_payload(&self) -> u64 {
+
+        let mut result: u64 = 0;
+        
+        let payload = &self.payload[0..self.payload.len() - 2];
+
+        for byte in payload {
+            print!("{byte:x} ");
+            result ^= (*byte as u64);
+            result = result << 1;
+        }
+
+        println!("");
+
+        return result;
     }
 
     fn set_payload(&mut self, payload: Vec<u8>) {
@@ -214,10 +252,16 @@ impl Frame {
         payload.append(&mut Vec::from(0x03_u8.to_be_bytes()));
         payload.append(&mut Vec::from(start.to_be_bytes()));
         payload.append(&mut Vec::from(count.to_be_bytes()));
-        
-        let mut crc16 = Frame::crc16_modbus(payload.clone());
+
+        let mut crc16 = {
+            let mut payload = payload.clone();
+            let mut crc16 = Frame::crc16_modbus(payload);
+            &mut Vec::from(crc16.to_le_bytes())
+        };
 
         payload.append(&mut crc16);
+
+        println!("Payload: {:?}", payload);
 
         self.set_payload(payload);
 
@@ -337,23 +381,17 @@ fn main() -> std::io::Result<()> {
             return Ok(());
         };
 
-        //let mut t_id = 1;
-        //let rsp = transact(&socket, heartbeat(t_id));
-        
-        // what I want:
-        // an u32
-        // that I can grab from multiple threads
-        // and when it's read it increases by one.
-        // how do that?
-        //let t_id = Arc::new(Mutex::new(1_u16));
         let t_id = Arc::new(Mutex::new(TransactionIdGenerator::new()));
+        let allow_read = Arc::new(Mutex::new(false));
 
         let (send_tx, send_rx) = mpsc::channel();
 
         // Send Heartbeat to Receiver;
         {
             let t_id_arc = Arc::clone(&t_id);
+            let allow_read = Arc::clone(&allow_read);
 
+            let mut count = 0;
             let send_tx: std::sync::mpsc::Sender<Frame> = send_tx.clone();
             // I'm assuming this has to be lower than the heartbeat wait time because
             // heartbeat wait is expect a heartbeat in x, if not, stop.
@@ -368,6 +406,10 @@ fn main() -> std::io::Result<()> {
                 // Infinite loop gooooo!
                 loop {
 
+                    if count == 1 {
+                        break;
+                    }
+
                     if seconds == 0 {
 
                         let t_id = {
@@ -377,7 +419,12 @@ fn main() -> std::io::Result<()> {
 
                         println!("Sending Frame");
                         send_tx.send(heartbeat(t_id));
-                        // t_id += 1;
+                        count += 1;
+
+                        {
+                            let mut allow_read = allow_read.lock().unwrap();
+                            *allow_read = true;
+                        }
                     }
 
                     thread::sleep(Duration::from_secs(1));
@@ -396,19 +443,33 @@ fn main() -> std::io::Result<()> {
         
         {
             let t_id_arc = Arc::clone(&t_id);
+            let allow_read = Arc::clone(&allow_read);
+
             let send_tx: std::sync::mpsc::Sender<Frame> = send_tx.clone();
             let info_delay = 10;
+            let mut count = 0;
 
             //this is fred, he is a thread;
             thread::spawn(move || {
 
-                let mut seconds = 0;
+                let mut seconds = 1;
 
                 loop {
 
-                    if seconds == 0 {
-                        let mut t_id = 1;
+                    {
+
+                        let allow_read = allow_read.lock().unwrap();
+
+                        if (*allow_read) == false {
+                            thread::sleep(Duration::from_secs(1));
+                            continue;
+                        }
+                    }
+
+                    if seconds == 0 && count < 1 {
                         
+                        let mut t_id = 1;
+
                         {
                             let mut lock = t_id_arc.lock().unwrap();
                             t_id = (*lock).get_id();
@@ -427,8 +488,11 @@ fn main() -> std::io::Result<()> {
 
                         // DEV_ADDR (u8), Register Address (u16), Count (u16)
                         read_frame.read_req(0x01, 0x000B, 1);
-
+                        
                         println!("Read Frame: {:?}", read_frame);
+                        send_tx.send(read_frame);
+                        count = count + 1;
+
 
                     }
 
@@ -533,6 +597,8 @@ fn main() -> std::io::Result<()> {
 
         for received in rx {
             println!("Frame from Invertor: {:?}", received);
+            let result = received.decode_payload();
+            println!("Result: {result}");
         }
 
     }
